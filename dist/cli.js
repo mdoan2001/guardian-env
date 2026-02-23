@@ -222,6 +222,68 @@ var BooleanValidator = class extends BaseValidator {
 function boolean() {
   return new BooleanValidator();
 }
+
+// src/validators/url.ts
+var UrlValidator = class _UrlValidator extends BaseValidator {
+  _protocols;
+  constructor(options = {}) {
+    super("url", options.required ?? true, options.defaultValue, options.description);
+    this._protocols = options.protocols ?? ["http", "https"];
+  }
+  parse(raw) {
+    if (raw === void 0 || raw === "") {
+      return { ok: false, error: "Value is required" };
+    }
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      return {
+        ok: false,
+        error: `Expected a valid URL, got "${raw}"`
+      };
+    }
+    const protocol = parsed.protocol.replace(":", "");
+    if (!this._protocols.includes(protocol)) {
+      return {
+        ok: false,
+        error: `URL protocol must be one of [${this._protocols.join(", ")}], got "${protocol}"`
+      };
+    }
+    return { ok: true, value: raw };
+  }
+  protocols(...allowed) {
+    const opts = { protocols: allowed };
+    if (this._description !== void 0) opts.description = this._description;
+    return new _UrlValidator(opts);
+  }
+};
+function url() {
+  return new UrlValidator();
+}
+
+// src/validators/email.ts
+var EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$/;
+var EmailValidator = class extends BaseValidator {
+  constructor(options = {}) {
+    super("email", options.required ?? true, options.defaultValue, options.description);
+  }
+  parse(raw) {
+    if (raw === void 0 || raw === "") {
+      return { ok: false, error: "Value is required" };
+    }
+    if (!EMAIL_REGEX.test(raw)) {
+      return {
+        ok: false,
+        error: `Expected a valid email address, got "${raw}"`
+      };
+    }
+    return { ok: true, value: raw };
+  }
+};
+function email() {
+  return new EmailValidator();
+}
 var ICONS = {
   missing: "\u2716",
   invalid_type: "\u26A0",
@@ -527,8 +589,7 @@ function defineEnv(schema) {
 // src/cli.ts
 function parseDotEnv(content) {
   const result = {};
-  const lines = content.split("\n");
-  for (const rawLine of lines) {
+  for (const rawLine of content.split("\n")) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     const eqIdx = line.indexOf("=");
@@ -538,67 +599,73 @@ function parseDotEnv(content) {
     if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) {
       value = value.slice(1, -1);
     }
-    if (key) {
-      result[key] = value;
-    }
+    if (key) result[key] = value;
   }
   return result;
 }
+function detectType(value) {
+  if (value === "true" || value === "false") return "boolean";
+  if (value !== "" && !isNaN(Number(value))) return "number";
+  try {
+    const u = new URL(value);
+    if (u.protocol === "http:" || u.protocol === "https:") return "url";
+  } catch {
+  }
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return "email";
+  return "string";
+}
+function inferSchemaFromEnv(env) {
+  const schema = {};
+  for (const [key, value] of Object.entries(env)) {
+    const type = detectType(value);
+    switch (type) {
+      case "boolean":
+        schema[key] = boolean().optional();
+        break;
+      case "number":
+        schema[key] = number().optional();
+        break;
+      case "url":
+        schema[key] = url().optional();
+        break;
+      case "email":
+        schema[key] = email().optional();
+        break;
+      default:
+        schema[key] = string().optional();
+        break;
+    }
+  }
+  return schema;
+}
+var SCHEMA_SEARCH_PATHS = [
+  "guardian-env.config.ts",
+  "guardian-env.config.js",
+  "guardian-env.config.mjs",
+  "env.schema.ts",
+  "env.schema.js",
+  "env.schema.mjs",
+  "env.config.ts",
+  "env.config.js"
+];
 async function loadSchemaFile(schemaPath) {
   if (!existsSync(schemaPath)) return null;
   try {
     const mod = await import(schemaPath);
     const schema = mod.default ?? mod.schema;
-    if (typeof schema !== "object" || schema === null) {
-      return null;
-    }
-    if ("parse" in schema && "validate" in schema && typeof schema.validate === "function") {
-      return schema;
-    }
+    if (typeof schema !== "object" || schema === null) return null;
     return schema;
   } catch {
     return null;
   }
 }
-function inferSchemaFromEnv(env) {
-  const schema = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (value === "true" || value === "false") {
-      schema[key] = boolean().optional();
-    } else if (!isNaN(Number(value)) && value !== "") {
-      schema[key] = number().optional();
-    } else {
-      schema[key] = string().optional();
-    }
+async function findSchema(explicitPath, cwd) {
+  const searchPaths = explicitPath ? [resolve(cwd, explicitPath)] : SCHEMA_SEARCH_PATHS.map((p) => resolve(cwd, p));
+  for (const schemaPath of searchPaths) {
+    const loaded = await loadSchemaFile(schemaPath);
+    if (loaded) return { schema: loaded, schemaFile: basename(schemaPath) };
   }
-  return schema;
-}
-function printHelp() {
-  console.log(`
-${pc2.bold(pc2.cyan("env-guardian"))} ${pc2.dim("\u2014 TypeScript-first environment validator")}
-
-${pc2.bold("Usage:")}
-  ${pc2.cyan("npx env-guardian")} ${pc2.yellow("<command>")} ${pc2.dim("[options]")}
-
-${pc2.bold("Commands:")}
-  ${pc2.yellow("check")}           Validate .env file against schema
-  ${pc2.yellow("generate")}        Generate a .env.example from schema or .env file
-  ${pc2.yellow("inspect")}         Show schema introspection table
-  ${pc2.yellow("help")}            Show this help message
-
-${pc2.bold("Options:")}
-  ${pc2.dim("--env")}           Path to .env file ${pc2.dim("(default: .env)")}
-  ${pc2.dim("--schema")}        Path to schema file ${pc2.dim("(default: env.schema.ts / env.schema.js)")}
-  ${pc2.dim("--output")}        Output file for generate command ${pc2.dim("(default: .env.example)")}
-  ${pc2.dim("--no-comments")}   Omit comments in generated file
-  ${pc2.dim("--node-env")}      Override NODE_ENV for env-specific validation
-
-${pc2.bold("Examples:")}
-  ${pc2.dim("npx env-guardian check")}
-  ${pc2.dim("npx env-guardian check --env .env.production --schema env.schema.js")}
-  ${pc2.dim("npx env-guardian generate --output .env.example")}
-  ${pc2.dim("npx env-guardian inspect")}
-`);
+  return null;
 }
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -608,7 +675,8 @@ function parseArgs(argv) {
     schemaFile: "",
     outputFile: ".env.example",
     noComments: false,
-    nodeEnv: void 0
+    nodeEnv: void 0,
+    strict: false
   };
   let i = 0;
   while (i < args.length) {
@@ -627,6 +695,8 @@ function parseArgs(argv) {
       result.outputFile = args[++i] ?? result.outputFile;
     } else if (arg === "--no-comments") {
       result.noComments = true;
+    } else if (arg === "--strict") {
+      result.strict = true;
     } else if (arg === "--node-env" && args[i + 1]) {
       const next = args[++i];
       if (next !== void 0) result.nodeEnv = next;
@@ -636,166 +706,373 @@ function parseArgs(argv) {
   return result;
 }
 async function commandCheck(args) {
-  const envPath = resolve(process.cwd(), args.envFile);
+  const cwd = process.cwd();
+  const envPath = resolve(cwd, args.envFile);
   if (!existsSync(envPath)) {
-    console.error(
-      `
-  ${pc2.red("\u2716")} ${pc2.bold(pc2.red("File not found:"))} ${pc2.cyan(args.envFile)}
-`
-    );
+    console.error([
+      "",
+      `  ${pc2.red("\u2716")} ${pc2.bold(pc2.red("No .env file found"))} at ${pc2.cyan(args.envFile)}`,
+      "",
+      `  ${pc2.dim("Create a")} ${pc2.cyan(".env")} ${pc2.dim("file first:")}`,
+      `  ${pc2.dim("  echo 'PORT=3000' > .env")}`,
+      ""
+    ].join("\n"));
     process.exit(1);
   }
   const envContent = readFileSync(envPath, "utf8");
   const envVars = parseDotEnv(envContent);
   const source = basename(envPath);
-  const schemaSearchPaths = args.schemaFile ? [resolve(process.cwd(), args.schemaFile)] : [
-    resolve(process.cwd(), "env.schema.ts"),
-    resolve(process.cwd(), "env.schema.js"),
-    resolve(process.cwd(), "env.schema.mjs"),
-    resolve(process.cwd(), "env.config.ts"),
-    resolve(process.cwd(), "env.config.js")
-  ];
-  let schemaLoaded = false;
-  for (const schemaPath of schemaSearchPaths) {
-    const loaded = await loadSchemaFile(schemaPath);
-    if (loaded) {
-      schemaLoaded = true;
-      if ("validate" in loaded && typeof loaded.validate === "function") {
-        const guardian2 = loaded;
-        const errors2 = guardian2.validate({
-          env: envVars,
-          nodeEnv: args.nodeEnv
-        });
-        if (errors2.length > 0) {
-          process.stderr.write(formatErrors(errors2, source));
-          process.exit(1);
-        }
-        const count2 = Object.keys(envVars).length;
-        process.stdout.write(formatSuccess(count2, source));
-        return;
-      }
-      const guardian = defineEnv(loaded);
-      const parseOpts = args.nodeEnv !== void 0 ? { env: envVars, nodeEnv: args.nodeEnv } : { env: envVars };
-      const errors = guardian.validate(parseOpts);
-      if (errors.length > 0) {
-        process.stderr.write(formatErrors(errors, source));
-        process.exit(1);
-      }
-      const count = Object.keys(envVars).length;
-      process.stdout.write(formatSuccess(count, source));
-      return;
-    }
-  }
-  if (!schemaLoaded) {
-    const count = Object.keys(envVars).length;
-    console.log(
-      `
-  ${pc2.yellow("\u26A0")} ${pc2.bold(pc2.yellow("No schema file found."))} Validating .env syntax only.
-  ${pc2.dim("Create env.schema.ts or pass --schema to enable full validation.")}
-`
-    );
-    process.stdout.write(formatSuccess(count, source));
-  }
-}
-async function commandGenerate(args) {
-  const schemaSearchPaths = args.schemaFile ? [resolve(process.cwd(), args.schemaFile)] : [
-    resolve(process.cwd(), "env.schema.ts"),
-    resolve(process.cwd(), "env.schema.js"),
-    resolve(process.cwd(), "env.schema.mjs"),
-    resolve(process.cwd(), "env.config.ts"),
-    resolve(process.cwd(), "env.config.js")
-  ];
-  for (const schemaPath of schemaSearchPaths) {
-    const loaded = await loadSchemaFile(schemaPath);
-    if (!loaded) continue;
-    let content;
-    if ("generateExample" in loaded && typeof loaded.generateExample === "function") {
-      const guardian = loaded;
-      content = guardian.generateExample({ comments: !args.noComments });
-    } else {
-      const guardian = defineEnv(loaded);
-      content = guardian.generateExample({ comments: !args.noComments });
-    }
-    const outputPath = resolve(process.cwd(), args.outputFile);
-    writeFileSync(outputPath, content, "utf8");
-    console.log(
-      `
-  ${pc2.green("\u2714")} ${pc2.bold(pc2.green("Generated"))} ${pc2.cyan(args.outputFile)}
-`
-    );
+  const keyCount = Object.keys(envVars).length;
+  if (keyCount === 0) {
+    console.log([
+      "",
+      `  ${pc2.yellow("\u26A0")} ${pc2.bold(pc2.yellow(args.envFile + " is empty"))}`,
+      `  ${pc2.dim("Add some environment variables and run again.")}`,
+      ""
+    ].join("\n"));
     return;
   }
-  const envPath = resolve(process.cwd(), args.envFile);
+  const found = await findSchema(args.schemaFile, cwd);
+  if (found) {
+    const guardian = "validate" in found.schema && typeof found.schema.validate === "function" ? found.schema : Object.assign(defineEnv(found.schema), {});
+    const validateFn = "validate" in guardian ? (opts) => guardian.validate(opts) : (opts) => defineEnv(found.schema).validate(opts);
+    const parseOpts = args.nodeEnv !== void 0 ? { env: envVars, nodeEnv: args.nodeEnv } : { env: envVars };
+    const errors = validateFn(parseOpts);
+    console.log(`
+  ${pc2.dim("Schema:")} ${pc2.cyan(found.schemaFile)}`);
+    if (errors.length > 0) {
+      process.stderr.write(formatErrors(errors, source));
+      process.exit(1);
+    }
+    process.stdout.write(formatSuccess(keyCount, source));
+    return;
+  }
+  console.log([
+    "",
+    `  ${pc2.bold(pc2.cyan("guardian-env"))} ${pc2.dim("\u2014 auto mode (no schema file found)")}`,
+    `  ${pc2.dim("Tip: run")} ${pc2.cyan("npx guardian-env init")} ${pc2.dim("to generate a typed schema")}`,
+    ""
+  ].join("\n"));
+  const inferredSchema = inferSchemaFromEnv(envVars);
+  const rows = [];
+  for (const [key, value] of Object.entries(envVars)) {
+    const type = detectType(value);
+    const validator = inferredSchema[key];
+    if (!validator) continue;
+    const result = validator.parse(value);
+    rows.push({ key, value, type, ok: result.ok });
+  }
+  const maxKeyLen = Math.max(...rows.map((r) => r.key.length), 10);
+  const colKey = maxKeyLen + 2;
+  console.log(
+    `  ${pc2.bold(pc2.dim("KEY".padEnd(colKey)))}${pc2.bold(pc2.dim("TYPE".padEnd(12)))}${pc2.bold(pc2.dim("VALUE"))}`
+  );
+  console.log(`  ${pc2.dim("\u2500".repeat(60))}`);
+  let hasInvalid = false;
+  for (const row of rows) {
+    const key = row.key.padEnd(colKey);
+    const type = pc2.dim(row.type.padEnd(12));
+    const val = row.value.length > 40 ? row.value.slice(0, 37) + "..." : row.value;
+    const displayVal = row.ok ? pc2.white(val) : pc2.red(val);
+    const status = row.ok ? "" : ` ${pc2.red("\u2716 invalid " + row.type)}`;
+    console.log(`  ${pc2.bold(key)}${type}${displayVal}${status}`);
+    if (!row.ok) hasInvalid = true;
+  }
+  console.log(`  ${pc2.dim("\u2500".repeat(60))}`);
+  if (hasInvalid && args.strict) {
+    console.log(`
+  ${pc2.red("\u2716")} ${pc2.bold(pc2.red("Validation failed"))} ${pc2.dim("(--strict mode)")}
+`);
+    process.exit(1);
+  }
+  const total = rows.length;
+  const invalidCount = rows.filter((r) => !r.ok).length;
+  if (invalidCount > 0) {
+    console.log([
+      "",
+      `  ${pc2.yellow("\u26A0")} ${pc2.bold(pc2.yellow(`${invalidCount} value(s) look malformed`))} ${pc2.dim(`out of ${total}`)}`,
+      `  ${pc2.dim("Run")} ${pc2.cyan("npx guardian-env init")} ${pc2.dim("to create a schema and validate strictly.")}`,
+      ""
+    ].join("\n"));
+  } else {
+    console.log([
+      "",
+      `  ${pc2.green("\u2714")} ${pc2.bold(pc2.green(`All ${total} variables look good`))} ${pc2.dim(`(inferred from ${source})`)}`,
+      `  ${pc2.dim("Run")} ${pc2.cyan("npx guardian-env init")} ${pc2.dim("to add strict validation with types.")}`,
+      ""
+    ].join("\n"));
+  }
+}
+async function commandInit(args) {
+  const cwd = process.cwd();
+  const envPath = resolve(cwd, args.envFile);
+  const outputFile = "guardian-env.config.ts";
+  const outputPath = resolve(cwd, outputFile);
+  if (existsSync(outputPath)) {
+    console.log([
+      "",
+      `  ${pc2.yellow("\u26A0")} ${pc2.bold(pc2.yellow(outputFile + " already exists"))}`,
+      `  ${pc2.dim("Delete it first or edit it manually.")}`,
+      ""
+    ].join("\n"));
+    return;
+  }
+  let lines = [];
+  if (existsSync(envPath)) {
+    const envContent = readFileSync(envPath, "utf8");
+    const envVars = parseDotEnv(envContent);
+    lines = generateConfigFromEnv(envVars, args.envFile);
+    writeFileSync(outputPath, lines.join("\n"), "utf8");
+    console.log([
+      "",
+      `  ${pc2.green("\u2714")} ${pc2.bold(pc2.green("Created"))} ${pc2.cyan(outputFile)}`,
+      `  ${pc2.dim(`Generated from ${args.envFile} with ${Object.keys(envVars).length} variables`)}`,
+      "",
+      `  ${pc2.bold("Next steps:")}`,
+      `  ${pc2.dim("1.")} Review ${pc2.cyan(outputFile)} ${pc2.dim("and adjust validators as needed")}`,
+      `  ${pc2.dim("2.")} Import in your app: ${pc2.cyan(`import { config } from './guardian-env.config'`)}`,
+      `  ${pc2.dim("3.")} Run ${pc2.cyan("npx guardian-env check")} ${pc2.dim("to validate")}`,
+      ""
+    ].join("\n"));
+  } else {
+    lines = generateBlankConfig();
+    writeFileSync(outputPath, lines.join("\n"), "utf8");
+    console.log([
+      "",
+      `  ${pc2.green("\u2714")} ${pc2.bold(pc2.green("Created"))} ${pc2.cyan(outputFile)} ${pc2.dim("(starter template)")}`,
+      "",
+      `  ${pc2.bold("Next steps:")}`,
+      `  ${pc2.dim("1.")} Edit ${pc2.cyan(outputFile)} ${pc2.dim("and define your env variables")}`,
+      `  ${pc2.dim("2.")} Create a ${pc2.cyan(".env")} ${pc2.dim("file with actual values")}`,
+      `  ${pc2.dim("3.")} Run ${pc2.cyan("npx guardian-env check")} ${pc2.dim("to validate")}`,
+      ""
+    ].join("\n"));
+  }
+}
+function generateConfigFromEnv(envVars, envFile) {
+  const lines = [
+    `import { defineEnv, string, number, boolean, url, email, enumValidator } from "guardian-env";`,
+    ``,
+    `// Auto-generated from ${envFile} by guardian-env`,
+    `// Adjust validators and add .describe() for documentation`,
+    ``,
+    `const env = defineEnv({`
+  ];
+  const groups = {};
+  const flat = [];
+  const prefixCounts = {};
+  for (const key of Object.keys(envVars)) {
+    const parts = key.split("_");
+    if (parts.length > 1 && parts[0]) {
+      prefixCounts[parts[0]] = (prefixCounts[parts[0]] ?? 0) + 1;
+    }
+  }
+  const groupPrefixes = new Set(
+    Object.entries(prefixCounts).filter(([, count]) => count >= 2).map(([prefix]) => prefix)
+  );
+  for (const [key, value] of Object.entries(envVars)) {
+    const parts = key.split("_");
+    const prefix = parts[0];
+    if (prefix && groupPrefixes.has(prefix) && parts.length > 1) {
+      if (!groups[prefix]) groups[prefix] = [];
+      groups[prefix].push({ key, field: parts.slice(1).join("_"), value });
+    } else {
+      flat.push({ key, value });
+    }
+  }
+  for (const { key, value } of flat) {
+    const type = detectType(value);
+    lines.push(`  ${key}: ${buildValidator(key, value, type)},`);
+  }
+  for (const [prefix, fields] of Object.entries(groups)) {
+    lines.push(``);
+    lines.push(`  ${prefix.toLowerCase()}: group(`);
+    lines.push(`    {`);
+    for (const { field, value, key } of fields) {
+      const type = detectType(value);
+      lines.push(`      ${field}: ${buildValidator(key, value, type)},`);
+    }
+    lines.push(`    },`);
+    lines.push(`    { prefix: "${prefix}_" },`);
+    lines.push(`  ),`);
+  }
+  if (Object.keys(groups).length > 0) {
+    lines[0] = `import { defineEnv, string, number, boolean, url, email, enumValidator, group } from "guardian-env";`;
+  }
+  lines.push(`});`);
+  lines.push(``);
+  lines.push(`export default env;`);
+  lines.push(``);
+  lines.push(`// Use in your app:`);
+  lines.push(`// export const config = env.parse();`);
+  lines.push(`// export type Config = typeof config;`);
+  lines.push(``);
+  return lines;
+}
+function buildValidator(key, value, type) {
+  const isRequired = value !== "";
+  const suffix = isRequired ? "" : ".optional()";
+  const keyUpper = key.toUpperCase();
+  if (keyUpper === "PORT" || keyUpper.endsWith("_PORT")) {
+    return `number().port().default(${Number(value) || 3e3})`;
+  }
+  if (keyUpper === "NODE_ENV") {
+    return `enumValidator(["development", "production", "test"] as const).default("${value || "development"}")`;
+  }
+  if (keyUpper.includes("LOG_LEVEL") || keyUpper === "LOG_LEVEL") {
+    return `enumValidator(["debug", "info", "warn", "error"] as const).default("${value || "info"}")`;
+  }
+  switch (type) {
+    case "boolean":
+      return `boolean()${value ? `.default(${value})` : suffix}`;
+    case "number":
+      return `number()${value ? `.default(${Number(value)})` : suffix}`;
+    case "url":
+      return `url()${suffix}`;
+    case "email":
+      return `email()${suffix}`;
+    default: {
+      if (!isRequired) return `string().optional()`;
+      return `string()${value.length > 40 ? "" : `.default(${JSON.stringify(value)})`}`;
+    }
+  }
+}
+function generateBlankConfig() {
+  return [
+    `import { defineEnv, string, number, boolean, url, email, enumValidator } from "guardian-env";`,
+    ``,
+    `// Define your environment variables schema here`,
+    `// Run: npx guardian-env check  to validate your .env`,
+    ``,
+    `const env = defineEnv({`,
+    `  // Server`,
+    `  PORT: number().port().default(3000),`,
+    `  NODE_ENV: enumValidator(["development", "production", "test"] as const).default("development"),`,
+    ``,
+    `  // Add your variables below:`,
+    `  // DATABASE_URL: url(),`,
+    `  // API_KEY: string().min(32),`,
+    `  // ADMIN_EMAIL: email().optional(),`,
+    `  // DEBUG: boolean().default(false),`,
+    `});`,
+    ``,
+    `export default env;`,
+    ``,
+    `// Use in your app:`,
+    `// export const config = env.parse();`,
+    `// export type Config = typeof config;`,
+    ``
+  ];
+}
+async function commandGenerate(args) {
+  const cwd = process.cwd();
+  const found = await findSchema(args.schemaFile, cwd);
+  if (found) {
+    let content;
+    if ("generateExample" in found.schema && typeof found.schema.generateExample === "function") {
+      const guardian = found.schema;
+      content = guardian.generateExample({ comments: !args.noComments });
+    } else {
+      const guardian = defineEnv(found.schema);
+      content = guardian.generateExample({ comments: !args.noComments });
+    }
+    const outputPath = resolve(cwd, args.outputFile);
+    writeFileSync(outputPath, content, "utf8");
+    console.log(`
+  ${pc2.green("\u2714")} ${pc2.bold(pc2.green("Generated"))} ${pc2.cyan(args.outputFile)} ${pc2.dim(`from ${found.schemaFile}`)}
+`);
+    return;
+  }
+  const envPath = resolve(cwd, args.envFile);
   if (existsSync(envPath)) {
     const envContent = readFileSync(envPath, "utf8");
     const envVars = parseDotEnv(envContent);
     const inferredSchema = inferSchemaFromEnv(envVars);
     const guardian = defineEnv(inferredSchema);
     const content = guardian.generateExample({ comments: !args.noComments });
-    const outputPath = resolve(process.cwd(), args.outputFile);
+    const outputPath = resolve(cwd, args.outputFile);
     writeFileSync(outputPath, content, "utf8");
-    console.log(
-      `
+    console.log(`
   ${pc2.green("\u2714")} ${pc2.bold(pc2.green("Generated"))} ${pc2.cyan(args.outputFile)} ${pc2.dim("(inferred from .env)")}
-`
-    );
+`);
     return;
   }
-  console.error(
-    `
+  console.error(`
   ${pc2.red("\u2716")} ${pc2.bold(pc2.red("No schema or .env file found."))} Cannot generate .env.example.
-`
-  );
+`);
   process.exit(1);
 }
 async function commandInspect(args) {
-  const schemaSearchPaths = args.schemaFile ? [resolve(process.cwd(), args.schemaFile)] : [
-    resolve(process.cwd(), "env.schema.ts"),
-    resolve(process.cwd(), "env.schema.js"),
-    resolve(process.cwd(), "env.schema.mjs")
-  ];
-  for (const schemaPath of schemaSearchPaths) {
-    const loaded = await loadSchemaFile(schemaPath);
-    if (!loaded) continue;
-    let fields;
-    if ("introspect" in loaded && typeof loaded.introspect === "function") {
-      const guardian = loaded;
-      fields = guardian.introspect().fields;
-    } else {
-      const guardian = defineEnv(loaded);
-      fields = guardian.introspect().fields;
-    }
-    const colW = { key: 30, type: 24, req: 9, def: 20 };
-    const header = pc2.bold(pc2.dim(" KEY".padEnd(colW.key))) + pc2.bold(pc2.dim("TYPE".padEnd(colW.type))) + pc2.bold(pc2.dim("REQ".padEnd(colW.req))) + pc2.bold(pc2.dim("DEFAULT".padEnd(colW.def))) + pc2.bold(pc2.dim("DESCRIPTION"));
-    console.log(`
-  ${pc2.bold(pc2.cyan("Schema Inspection"))}
+  const cwd = process.cwd();
+  const found = await findSchema(args.schemaFile, cwd);
+  if (!found) {
+    console.error(`
+  ${pc2.red("\u2716")} ${pc2.bold(pc2.red("No schema file found."))} Run ${pc2.cyan("npx guardian-env init")} to create one.
 `);
-    console.log(`  ${header}`);
-    console.log(`  ${pc2.dim("\u2500".repeat(90))}`);
-    for (const f of fields) {
-      const key = (f.group ? `${pc2.dim(f.group + ".")}${f.key}` : f.key).padEnd(colW.key);
-      const type = pc2.cyan(f.type).padEnd(colW.type + 9);
-      const req = (f.required ? pc2.red("yes") : pc2.green("no")).padEnd(colW.req + 9);
-      const def = (f.default !== void 0 ? pc2.dim(String(f.default)) : pc2.dim("\u2014")).padEnd(colW.def + 9);
-      const desc = pc2.dim(f.description ?? "");
-      console.log(`  ${key}${type}${req}${def}${desc}`);
-    }
-    console.log(`  ${pc2.dim("\u2500".repeat(90))}
-`);
-    return;
+    process.exit(1);
   }
-  console.error(
-    `
-  ${pc2.red("\u2716")} ${pc2.bold(pc2.red("No schema file found."))} Pass ${pc2.cyan("--schema")} to specify one.
-`
-  );
-  process.exit(1);
+  let fields;
+  if ("introspect" in found.schema && typeof found.schema.introspect === "function") {
+    const guardian = found.schema;
+    fields = guardian.introspect().fields;
+  } else {
+    const guardian = defineEnv(found.schema);
+    fields = guardian.introspect().fields;
+  }
+  const colW = { key: 30, type: 24, req: 9, def: 20 };
+  const header = pc2.bold(pc2.dim(" KEY".padEnd(colW.key))) + pc2.bold(pc2.dim("TYPE".padEnd(colW.type))) + pc2.bold(pc2.dim("REQ".padEnd(colW.req))) + pc2.bold(pc2.dim("DEFAULT".padEnd(colW.def))) + pc2.bold(pc2.dim("DESCRIPTION"));
+  console.log(`
+  ${pc2.bold(pc2.cyan("Schema Inspection"))} ${pc2.dim(`(${found.schemaFile})`)}
+`);
+  console.log(`  ${header}`);
+  console.log(`  ${pc2.dim("\u2500".repeat(90))}`);
+  for (const f of fields) {
+    const key = (f.group ? `${pc2.dim(f.group + ".")}${f.key}` : f.key).padEnd(colW.key);
+    const type = pc2.cyan(f.type).padEnd(colW.type + 9);
+    const req = (f.required ? pc2.red("yes") : pc2.green("no")).padEnd(colW.req + 9);
+    const def = (f.default !== void 0 ? pc2.dim(String(f.default)) : pc2.dim("\u2014")).padEnd(colW.def + 9);
+    const desc = pc2.dim(f.description ?? "");
+    console.log(`  ${key}${type}${req}${def}${desc}`);
+  }
+  console.log(`  ${pc2.dim("\u2500".repeat(90))}
+`);
+}
+function printHelp() {
+  console.log(`
+${pc2.bold(pc2.cyan("guardian-env"))} ${pc2.dim("\u2014 zero-config environment variable validator")}
+
+${pc2.bold("Usage:")}
+  ${pc2.cyan("npx guardian-env")} ${pc2.yellow("<command>")} ${pc2.dim("[options]")}
+
+${pc2.bold("Commands:")}
+  ${pc2.yellow("check")}      Validate .env variables ${pc2.dim("(works without a schema)")}
+  ${pc2.yellow("init")}       Generate a typed schema file from your .env
+  ${pc2.yellow("generate")}   Generate a .env.example file
+  ${pc2.yellow("inspect")}    Show schema field table
+  ${pc2.yellow("help")}       Show this help
+
+${pc2.bold("Options:")}
+  ${pc2.dim("--env")}        Path to .env file          ${pc2.dim("(default: .env)")}
+  ${pc2.dim("--schema")}     Path to schema file        ${pc2.dim("(default: guardian-env.config.ts)")}
+  ${pc2.dim("--output")}     Output for generate        ${pc2.dim("(default: .env.example)")}
+  ${pc2.dim("--strict")}     Fail on type mismatch in auto mode
+  ${pc2.dim("--no-comments")} Omit comments in generated files
+  ${pc2.dim("--node-env")}   Override NODE_ENV
+
+${pc2.bold("Quick start (zero-config):")}
+  ${pc2.dim("npx guardian-env check")}                 ${pc2.dim("# validate .env right now")}
+  ${pc2.dim("npx guardian-env init")}                  ${pc2.dim("# generate typed config from .env")}
+  ${pc2.dim("npx guardian-env generate")}              ${pc2.dim("# create .env.example")}
+`);
 }
 async function main() {
   const args = parseArgs(process.argv);
   switch (args.command) {
     case "check":
       await commandCheck(args);
+      break;
+    case "init":
+      await commandInit(args);
       break;
     case "generate":
       await commandGenerate(args);
