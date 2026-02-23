@@ -1,0 +1,68 @@
+{
+  "name": "guardian-env",
+  "version": "1.0.0",
+  "description": "A lightweight TypeScript-first environment variable validator for Node.js projects",
+  "author": "Doan Nguyen",
+  "license": "MIT",
+  "keywords": [
+    "env",
+    "environment",
+    "validator",
+    "typescript",
+    "dotenv",
+    "schema",
+    "validation"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "guardian-env": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mdoan2001/guardian-env"
+  },
+  "bugs": {
+    "url": "https://github.com/mdoan2001/guardian-env/issues"
+  },
+  "homepage": "https://github.com/mdoan2001/guardian-env#readme"
+}
