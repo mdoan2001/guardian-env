@@ -1,6 +1,6 @@
 {
   "name": "guardian-env",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "A lightweight TypeScript-first environment variable validator for Node.js projects",
   "author": "Doan Nguyen",
   "license": "MIT",
