@@ -1,6 +1,10 @@
 # guardian-env
 
-> Catch missing or invalid environment variables before your app starts — with zero config.
+> Catch missing or invalid environment variables **before your app starts** — with zero config.
+
+[![npm version](https://img.shields.io/npm/v/guardian-env)](https://www.npmjs.com/package/guardian-env)
+[![license](https://img.shields.io/npm/l/guardian-env)](LICENSE)
+[![node](https://img.shields.io/node/v/guardian-env)](https://nodejs.org)
 
 ```bash
 npm install guardian-env
@@ -10,146 +14,76 @@ npm install guardian-env
 
 ## The Problem
 
-Every Node.js app reads `process.env`. But env vars are untyped strings — a missing `DATABASE_URL` or a typo in `PORT` only blows up at runtime, deep inside your app, with a cryptic error.
+Every Node.js app reads `process.env`, but env vars are untyped strings — a missing `DATABASE_URL` or a typo in `PORT` only blows up at runtime, deep inside your app, with a cryptic error.
 
 **guardian-env** catches these issues at startup with a clear, actionable error. No runtime surprises.
 
 ---
 
-## Zero-Config: Just Run It
+## Zero Config: Just Run It
 
-No setup required. Point it at your project:
+Point it at your project and go:
 
 ```bash
 npx guardian-env check
 ```
 
-It **scans your source code** for every `process.env.KEY` and `import.meta.env.KEY` used, then compares against your `.env` file. Missing keys fail immediately:
+It **scans your source code** for every `process.env.KEY` and `import.meta.env.KEY` in use, then compares against your `.env` file. Missing keys fail immediately:
 
 ```
   guardian-env — auto mode
   Reference: source code (4 keys found)
 
-  ── Missing Variables (2) ──────────────────
-  ✖ PUBLIC_GIT_CLIENT_ID      → used in code but not set in .env
-  ✖ PUBLIC_LINKEDIN_CLIENT_ID → used in code but not set in .env
+  ── Missing Variables (2) ──────────────────────────────
+  ✖ DATABASE_URL   → used in code but not set in .env
+  ✖ JWT_SECRET     → used in code but not set in .env
 
-  KEY                       TYPE    VALUE
+  KEY              TYPE    VALUE
   ──────────────────────────────────────────────────────
-  PUBLIC_GOOGLE_CLIENT_ID   string  683860256203-abc...
-  PUBLIC_API_URL            url     http://localhost:3000/api
+  PORT             number  3000
+  API_URL          url     http://localhost:3000/api
   ──────────────────────────────────────────────────────
 
   ✖ Validation failed (2 missing)
   Add the missing variables to your .env file.
 ```
 
-Supports `process.env`, `import.meta.env` (Vite/SvelteKit), and destructuring:
+All common access patterns are supported:
 
 ```ts
-process.env.API_KEY
-import.meta.env.PUBLIC_API_URL
-const { DB_HOST, DB_PORT } = process.env
+process.env.API_KEY                          // Node.js
+import.meta.env.PUBLIC_API_URL               // Vite / SvelteKit
+const { DB_HOST, DB_PORT } = process.env     // Destructuring
 ```
 
-If no source code is found, falls back to comparing against `.env.example`.
-
----
-
-## Typed Validation in Code
-
-For stricter validation with full TypeScript inference:
-
-```ts
-// src/env.ts
-import { defineEnv, string, number, boolean, url, email, enumValidator, group } from "guardian-env";
-
-export const env = defineEnv({
-  PORT:     number().port().default(3000),
-  NODE_ENV: enumValidator(["development", "production", "test"] as const).default("development"),
-
-  db: group(
-    {
-      URL:       url(),
-      POOL_SIZE: number().int().min(1).default(10),
-      SSL:       boolean().default(false),
-    },
-    { prefix: "DB_" }, // reads DB_URL, DB_POOL_SIZE, DB_SSL
-  ),
-
-  JWT_SECRET:  string().min(32),
-  ADMIN_EMAIL: email().optional(),
-});
-
-export const config = env.parse(); // throws on startup if env is invalid
-export type Config = typeof config;
-```
-
-```ts
-// Anywhere in your app — fully typed, no casting
-import { config } from "./env.js";
-
-config.PORT          // number
-config.NODE_ENV      // "development" | "production" | "test"
-config.db.URL        // string
-config.ADMIN_EMAIL   // string | undefined
-```
-
-Error output on startup failure:
-
-```
-  ✖ guardian-env: Validation failed (2 errors)
-
-  ── Missing Variables ──────────────────────
-  ✖ DB_URL     → missing required variable
-  ✖ JWT_SECRET → missing required variable
-
-  Fix the above errors in your .env file and restart.
-```
+> If no source code is found, guardian-env falls back to comparing against `.env.example`.
 
 ---
 
 ## Validators
 
-| Validator | Example |
-|---|---|
-| `string()` | `string().min(8).max(100).matches(/regex/)` |
-| `number()` | `number().int().min(0).max(65535)` / `number().port()` |
-| `boolean()` | accepts `true / false / 1 / 0 / yes / no / on / off` |
-| `url()` | `url().protocols("postgresql", "https")` |
-| `email()` | `email()` |
-| `enumValidator()` | `enumValidator(["a", "b"] as const)` |
+| Validator | Description | Example |
+|---|---|---|
+| `string()` | Any text value | `string().min(8).max(100).matches(/regex/)` |
+| `number()` | Integer or float | `number().int().min(0).max(65535)` · `number().port()` |
+| `boolean()` | Accepts `true/false/1/0/yes/no/on/off` | `boolean().default(false)` |
+| `url()` | Valid URL | `url().protocols("postgresql", "https")` |
+| `email()` | Valid email address | `email().optional()` |
+| `enumValidator()` | Restrict to allowed values | `enumValidator(["a", "b"] as const)` |
 
 **Modifiers** — available on all validators:
 
 ```ts
-string().optional()        // undefined if missing
-string().default("value")  // fallback if missing
-string().describe("hint")  // shown in generated .env.example
+string().optional()         // undefined if the variable is missing
+string().default("value")   // fallback value if the variable is missing
+string().describe("hint")   // shown in generated .env.example output
 ```
 
 ---
 
-## CLI
+### Config via `package.json`
 
-```bash
-npx guardian-env check              # scan source + validate .env
-npx guardian-env init               # generate guardian-env.config.ts from .env
-npx guardian-env generate           # create .env.example
-npx guardian-env inspect            # show schema field table
-```
-
-**Options:**
-
-```bash
---env .env.production    # use a different .env file
---schema path/to/file    # use a specific schema file
---strict                 # fail on type mismatch in auto mode
-```
-
-### Config in `package.json`
-
-No extra files needed. Add a `"guardian-env"` key to your `package.json`:
+No extra config file needed. Add a `"guardian-env"` key to your `package.json`:
 
 ```json
 {
@@ -162,7 +96,7 @@ No extra files needed. Add a `"guardian-env"` key to your `package.json`:
 
 | Option | Description |
 |---|---|
-| `ignore` | Keys to exclude from validation (e.g. framework-injected vars like `SITE`, `ORIGIN`) |
+| `ignore` | Keys to skip during validation (e.g. framework-injected vars like `SITE`, `ORIGIN`) |
 | `src` | Directory to scan for env usage (default: project root) |
 
 ---
@@ -170,7 +104,9 @@ No extra files needed. Add a `"guardian-env"` key to your `package.json`:
 ## Advanced
 
 <details>
-<summary>Env-specific overrides</summary>
+<summary>Per-environment overrides</summary>
+
+Override validators for specific environments:
 
 ```ts
 const env = defineEnv({
@@ -201,7 +137,9 @@ db: group(
 </details>
 
 <details>
-<summary>No-throw validation</summary>
+<summary>Non-throwing validation</summary>
+
+Get a list of errors instead of throwing:
 
 ```ts
 const errors = env.validate(); // returns EnvError[] instead of throwing
@@ -211,6 +149,8 @@ const errors = env.validate(); // returns EnvError[] instead of throwing
 
 <details>
 <summary>Testing</summary>
+
+Pass a mock env object directly when parsing:
 
 ```ts
 const config = env.parse({
@@ -223,6 +163,8 @@ const config = env.parse({
 
 <details>
 <summary>Custom validator</summary>
+
+Write your own validator for special rules:
 
 ```ts
 import { CustomValidator } from "guardian-env";
@@ -241,4 +183,4 @@ const env = defineEnv({ BRAND_COLOR: hexColor });
 
 ## License
 
-MIT
+MIT © [Doan Nguyen](https://github.com/mdoan2001)
