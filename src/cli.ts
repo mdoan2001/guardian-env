@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { resolve, basename } from "node:path";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { resolve, basename, extname, join } from "node:path";
 import pc from "picocolors";
 import type { FlatSchemaShape } from "./types.js";
 import { defineEnv } from "./schema.js";
@@ -36,6 +36,67 @@ function parseDotEnv(content: string): Record<string, string> {
   }
 
   return result;
+}
+
+// ─── Source Code Scanner ──────────────────────────────────────────────────────
+
+const SOURCE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".svelte", ".vue"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", ".nuxt", ".svelte-kit", "coverage", ".turbo"]);
+
+// Matches: process.env.FOO  import.meta.env.FOO  env.FOO (inside destructure)
+const ENV_KEY_REGEX = /(?:process\.env|import\.meta\.env)\.([A-Z][A-Z0-9_]*)/g;
+// Also catches: const { FOO, BAR } = process.env
+const DESTRUCTURE_REGEX = /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(?:process\.env|import\.meta\.env)/g;
+
+function scanSourceFiles(cwd: string): Set<string> {
+  const found = new Set<string>();
+
+  function walk(dir: string): void {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry)) continue;
+      const full = join(dir, entry);
+      let stat;
+      try {
+        stat = statSync(full);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(full);
+      } else if (SOURCE_EXTS.has(extname(entry))) {
+        try {
+          const content = readFileSync(full, "utf8");
+
+          // process.env.KEY or import.meta.env.KEY
+          for (const match of content.matchAll(ENV_KEY_REGEX)) {
+            if (match[1]) found.add(match[1]);
+          }
+
+          // const { KEY1, KEY2 } = process.env
+          for (const match of content.matchAll(DESTRUCTURE_REGEX)) {
+            if (!match[1]) continue;
+            for (const part of match[1].split(",")) {
+              const key = part.trim().split(/\s*:\s*/)[0]?.trim();
+              if (key && /^[A-Z][A-Z0-9_]*$/.test(key)) found.add(key);
+            }
+          }
+        } catch {
+          // skip unreadable files
+        }
+      }
+    }
+  }
+
+  walk(cwd);
+  return found;
 }
 
 // ─── Smart type detection ─────────────────────────────────────────────────────
@@ -226,24 +287,69 @@ async function commandCheck(args: CliArgs): Promise<void> {
   }
 
   // ── 3. No schema — auto-infer mode ──
+
+  // Priority 1: scan source code for process.env.KEY / import.meta.env.KEY
+  const scannedKeys = scanSourceFiles(cwd);
+
+  // Priority 2: fallback to .env.example keys
+  const examplePath = resolve(cwd, ".env.example");
+  const exampleVars = existsSync(examplePath)
+    ? parseDotEnv(readFileSync(examplePath, "utf8"))
+    : null;
+
+  // Build the reference set of "expected" keys
+  // Prefer scanned keys if found; merge with .env.example as supplement
+  const expectedKeys = new Set<string>();
+  let referenceSource = "";
+
+  if (scannedKeys.size > 0) {
+    for (const k of scannedKeys) expectedKeys.add(k);
+    referenceSource = `source code (${scannedKeys.size} keys found)`;
+  }
+  if (exampleVars) {
+    for (const k of Object.keys(exampleVars)) expectedKeys.add(k);
+    referenceSource = scannedKeys.size > 0
+      ? `source code + .env.example`
+      : `.env.example`;
+  }
+
+  // Keys that are expected but not in .env
+  const missingKeys = expectedKeys.size > 0
+    ? [...expectedKeys].filter((k) => !(k in envVars))
+    : [];
+
+  // Keys in .env that are not used anywhere (only report if we have source scan)
+  const unusedKeys = scannedKeys.size > 0
+    ? Object.keys(envVars).filter((k) => !scannedKeys.has(k) && !(exampleVars && k in exampleVars))
+    : [];
+
   console.log([
     "",
-    `  ${pc.bold(pc.cyan("guardian-env"))} ${pc.dim("— auto mode (no schema file found)")}`,
-    `  ${pc.dim("Tip: run")} ${pc.cyan("npx guardian-env init")} ${pc.dim("to generate a typed schema")}`,
+    `  ${pc.bold(pc.cyan("guardian-env"))} ${pc.dim("— auto mode")}`,
+    referenceSource
+      ? `  ${pc.dim("Reference:")} ${pc.cyan(referenceSource)}`
+      : `  ${pc.dim("No reference found. Add")} ${pc.cyan(".env.example")} ${pc.dim("or use")} ${pc.cyan("process.env.KEY")} ${pc.dim("in your source code.")}`,
     "",
   ].join("\n"));
 
+  // Report missing keys
+  if (missingKeys.length > 0) {
+    console.log(pc.bold(pc.dim(`  ── Missing Variables (${missingKeys.length}) ──────────────────`)));
+    for (const key of missingKeys) {
+      console.log(`  ${pc.red("✖")} ${pc.bold(pc.red(key))} ${pc.dim("→")} ${pc.red("used in code but not set in .env")}`);
+    }
+    console.log("");
+  }
+
   const inferredSchema = inferSchemaFromEnv(envVars);
 
-  // Collect inferred results
+  // Collect inferred results for present keys
   const rows: Array<{ key: string; value: string; type: InferredType; ok: boolean }> = [];
 
   for (const [key, value] of Object.entries(envVars)) {
     const type = detectType(value);
     const validator = inferredSchema[key];
-
     if (!validator) continue;
-
     const result = validator.parse(value);
     rows.push({ key, value, type, ok: result.ok });
   }
@@ -270,30 +376,51 @@ async function commandCheck(args: CliArgs): Promise<void> {
 
   console.log(`  ${pc.dim("─".repeat(60))}`);
 
-  // In strict mode, fail on invalid values
-  if (hasInvalid && args.strict) {
-    console.log(`\n  ${pc.red("✖")} ${pc.bold(pc.red("Validation failed"))} ${pc.dim("(--strict mode)")}\n`);
-    process.exit(1);
+  // Report unused keys (in .env but never read in code)
+  if (unusedKeys.length > 0) {
+    console.log("");
+    console.log(pc.bold(pc.dim(`  ── Unused Variables (${unusedKeys.length}) ───────────────────`)));
+    for (const key of unusedKeys) {
+      console.log(`  ${pc.dim("·")} ${pc.dim(key)} ${pc.dim("→ in .env but not found in source code")}`);
+    }
   }
 
-  // Summary
-  const total = rows.length;
+  // Fail conditions
+  const hasMissing = missingKeys.length > 0;
   const invalidCount = rows.filter((r) => !r.ok).length;
+
+  if (hasMissing || (hasInvalid && args.strict)) {
+    const reasons: string[] = [];
+    if (hasMissing) reasons.push(`${missingKeys.length} missing`);
+    if (hasInvalid && args.strict) reasons.push(`${invalidCount} invalid`);
+
+    console.log([
+      "",
+      `  ${pc.red("✖")} ${pc.bold(pc.red(`Validation failed`))} ${pc.dim(`(${reasons.join(", ")})`)}`,
+      hasMissing
+        ? `  ${pc.dim("Add the missing variables to your")} ${pc.cyan(source)} ${pc.dim("file.")}`
+        : `  ${pc.dim("Fix the invalid values in your")} ${pc.cyan(source)} ${pc.dim("file.")}`,
+      "",
+    ].join("\n"));
+    process.exit(1);
+  }
 
   if (invalidCount > 0) {
     console.log([
       "",
-      `  ${pc.yellow("⚠")} ${pc.bold(pc.yellow(`${invalidCount} value(s) look malformed`))} ${pc.dim(`out of ${total}`)}`,
+      `  ${pc.yellow("⚠")} ${pc.bold(pc.yellow(`${invalidCount} value(s) look malformed`))} ${pc.dim(`out of ${rows.length}`)}`,
       `  ${pc.dim("Run")} ${pc.cyan("npx guardian-env init")} ${pc.dim("to create a schema and validate strictly.")}`,
       "",
     ].join("\n"));
   } else {
     console.log([
       "",
-      `  ${pc.green("✔")} ${pc.bold(pc.green(`All ${total} variables look good`))} ${pc.dim(`(inferred from ${source})`)}`,
-      `  ${pc.dim("Run")} ${pc.cyan("npx guardian-env init")} ${pc.dim("to add strict validation with types.")}`,
+      `  ${pc.green("✔")} ${pc.bold(pc.green(`All ${rows.length} variables look good`))} ${pc.dim(`(inferred from ${source})`)}`,
+      !exampleVars
+        ? `  ${pc.dim("Run")} ${pc.cyan("npx guardian-env init")} ${pc.dim("to add strict validation with types.")}`
+        : "",
       "",
-    ].join("\n"));
+    ].filter(Boolean).join("\n"));
   }
 }
 

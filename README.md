@@ -1,6 +1,6 @@
 # guardian-env
 
-> Validate environment variables at startup — before your app runs into mysterious crashes.
+> Catch missing or invalid environment variables before your app starts — with zero config.
 
 ```bash
 npm install guardian-env
@@ -10,46 +10,55 @@ npm install guardian-env
 
 ## The Problem
 
-Every Node.js app reads from `process.env`. But environment variables are untyped strings — a missing `DATABASE_URL` or a typo in `PORT` only blows up at runtime, deep inside your application, with a cryptic error.
+Every Node.js app reads `process.env`. But env vars are untyped strings — a missing `DATABASE_URL` or a typo in `PORT` only blows up at runtime, deep inside your app, with a cryptic error.
 
-**guardian-env validates your env at startup**, throws a clear error immediately, and gives you full TypeScript types throughout your codebase.
+**guardian-env** catches these issues at startup with a clear, actionable error. No runtime surprises.
 
 ---
 
-## Zero-Config Quick Start
+## Zero-Config: Just Run It
 
-No schema? No problem. Just run:
+No setup required. Point it at your project:
 
 ```bash
 npx guardian-env check
 ```
 
-It reads your `.env`, infers types, and reports the result:
+It **scans your source code** for every `process.env.KEY` and `import.meta.env.KEY` used, then compares against your `.env` file. Missing keys fail immediately:
 
 ```
-  KEY           TYPE        VALUE
-  ────────────────────────────────────────────────────
-  PORT          number      3000
-  DATABASE_URL  url         https://db.example.com
-  ADMIN_EMAIL   email       admin@example.com
-  DEBUG         boolean     false
-  ────────────────────────────────────────────────────
+  guardian-env — auto mode
+  Reference: source code (4 keys found)
 
-  ✔ All 4 variables look good
-  Run npx guardian-env init to add strict validation with types.
+  ── Missing Variables (2) ──────────────────
+  ✖ PUBLIC_GIT_CLIENT_ID      → used in code but not set in .env
+  ✖ PUBLIC_LINKEDIN_CLIENT_ID → used in code but not set in .env
+
+  KEY                       TYPE    VALUE
+  ──────────────────────────────────────────────────────
+  PUBLIC_GOOGLE_CLIENT_ID   string  683860256203-abc...
+  PUBLIC_API_URL            url     http://localhost:3000/api
+  ──────────────────────────────────────────────────────
+
+  ✖ Validation failed (2 missing)
+  Add the missing variables to your .env file.
 ```
 
-Then generate a typed schema from your `.env` automatically:
+Supports `process.env`, `import.meta.env` (Vite/SvelteKit), and destructuring:
 
-```bash
-npx guardian-env init
+```ts
+process.env.API_KEY
+import.meta.env.PUBLIC_API_URL
+const { DB_HOST, DB_PORT } = process.env
 ```
 
-This creates `guardian-env.config.ts` — ready to import in your app.
+If no source code is found, falls back to comparing against `.env.example`.
 
 ---
 
-## Usage in Code
+## Typed Validation in Code
+
+For stricter validation with full TypeScript inference:
 
 ```ts
 // src/env.ts
@@ -61,7 +70,7 @@ export const env = defineEnv({
 
   db: group(
     {
-      URL:       url().describe("PostgreSQL connection string"),
+      URL:       url(),
       POOL_SIZE: number().int().min(1).default(10),
       SSL:       boolean().default(false),
     },
@@ -77,24 +86,23 @@ export type Config = typeof config;
 ```
 
 ```ts
-// Anywhere in your app — fully typed
+// Anywhere in your app — fully typed, no casting
 import { config } from "./env.js";
 
 config.PORT          // number
 config.NODE_ENV      // "development" | "production" | "test"
 config.db.URL        // string
-config.db.POOL_SIZE  // number
 config.ADMIN_EMAIL   // string | undefined
 ```
 
-If validation fails, you get a clear error immediately on startup:
+Error output on startup failure:
 
 ```
   ✖ guardian-env: Validation failed (2 errors)
 
   ── Missing Variables ──────────────────────
-  ✖ DB_URL      → missing required variable
-  ✖ JWT_SECRET  → missing required variable
+  ✖ DB_URL     → missing required variable
+  ✖ JWT_SECRET → missing required variable
 
   Fix the above errors in your .env file and restart.
 ```
@@ -107,17 +115,17 @@ If validation fails, you get a clear error immediately on startup:
 |---|---|
 | `string()` | `string().min(8).max(100).matches(/regex/)` |
 | `number()` | `number().int().min(0).max(65535)` / `number().port()` |
-| `boolean()` | accepts `true/false/1/0/yes/no/on/off` |
+| `boolean()` | accepts `true / false / 1 / 0 / yes / no / on / off` |
 | `url()` | `url().protocols("postgresql", "https")` |
 | `email()` | `email()` |
 | `enumValidator()` | `enumValidator(["a", "b"] as const)` |
 
-**Modifiers** — available on every validator:
+**Modifiers** — available on all validators:
 
 ```ts
-string().optional()       // allow missing → value is string | undefined
-string().default("foo")   // use fallback when missing
-string().describe("hint") // shown in .env.example and npx guardian-env inspect
+string().optional()        // undefined if missing
+string().default("value")  // fallback if missing
+string().describe("hint")  // shown in generated .env.example
 ```
 
 ---
@@ -125,32 +133,26 @@ string().describe("hint") // shown in .env.example and npx guardian-env inspect
 ## CLI
 
 ```bash
-npx guardian-env check              # validate .env (auto-infer if no schema)
+npx guardian-env check              # scan source + validate .env
 npx guardian-env init               # generate guardian-env.config.ts from .env
 npx guardian-env generate           # create .env.example
 npx guardian-env inspect            # show schema field table
 ```
 
+**Options:**
+
 ```bash
-# Options
---env .env.production               # use a different .env file
---schema path/to/schema.ts          # use a specific schema file
---strict                            # fail on type mismatch in auto mode
+--env .env.production    # use a different .env file
+--schema path/to/file    # use a specific schema file
+--strict                 # fail on type mismatch in auto mode
 ```
-
-### Schema file auto-detection
-
-The CLI looks for schema files in this order:
-
-1. `guardian-env.config.ts` / `.js`
-2. `env.schema.ts` / `.js`
-3. `env.config.ts` / `.js`
 
 ---
 
 ## Advanced
 
-### Env-specific overrides
+<details>
+<summary>Env-specific overrides</summary>
 
 ```ts
 const env = defineEnv({
@@ -161,7 +163,10 @@ const env = defineEnv({
 });
 ```
 
-### Group with env-specific override
+</details>
+
+<details>
+<summary>Group with per-environment schema</summary>
 
 ```ts
 db: group(
@@ -175,22 +180,31 @@ db: group(
 ),
 ```
 
-### No-throw validation
+</details>
+
+<details>
+<summary>No-throw validation</summary>
 
 ```ts
 const errors = env.validate(); // returns EnvError[] instead of throwing
 ```
 
-### Testing
+</details>
+
+<details>
+<summary>Testing</summary>
 
 ```ts
 const config = env.parse({
-  env: { DB_URL: "postgresql://localhost/test" }, // inject test values
+  env: { DB_URL: "postgresql://localhost/test" },
   nodeEnv: "test",
 });
 ```
 
-### Custom validator
+</details>
+
+<details>
+<summary>Custom validator</summary>
 
 ```ts
 import { CustomValidator } from "guardian-env";
@@ -202,6 +216,8 @@ const hexColor = new CustomValidator<string>((raw) => {
 
 const env = defineEnv({ BRAND_COLOR: hexColor });
 ```
+
+</details>
 
 ---
 

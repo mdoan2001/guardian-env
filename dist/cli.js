@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { writeFileSync, existsSync, readFileSync } from 'fs';
-import { resolve, basename } from 'path';
+import { writeFileSync, existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import { resolve, basename, join, extname } from 'path';
 import pc2 from 'picocolors';
 
 // src/validators/base.ts
@@ -603,6 +603,51 @@ function parseDotEnv(content) {
   }
   return result;
 }
+var SOURCE_EXTS = /* @__PURE__ */ new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".svelte", ".vue"]);
+var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", ".next", ".nuxt", ".svelte-kit", "coverage", ".turbo"]);
+var ENV_KEY_REGEX = /(?:process\.env|import\.meta\.env)\.([A-Z][A-Z0-9_]*)/g;
+var DESTRUCTURE_REGEX = /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(?:process\.env|import\.meta\.env)/g;
+function scanSourceFiles(cwd) {
+  const found = /* @__PURE__ */ new Set();
+  function walk(dir) {
+    let entries;
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry)) continue;
+      const full = join(dir, entry);
+      let stat;
+      try {
+        stat = statSync(full);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        walk(full);
+      } else if (SOURCE_EXTS.has(extname(entry))) {
+        try {
+          const content = readFileSync(full, "utf8");
+          for (const match of content.matchAll(ENV_KEY_REGEX)) {
+            if (match[1]) found.add(match[1]);
+          }
+          for (const match of content.matchAll(DESTRUCTURE_REGEX)) {
+            if (!match[1]) continue;
+            for (const part of match[1].split(",")) {
+              const key = part.trim().split(/\s*:\s*/)[0]?.trim();
+              if (key && /^[A-Z][A-Z0-9_]*$/.test(key)) found.add(key);
+            }
+          }
+        } catch {
+        }
+      }
+    }
+  }
+  walk(cwd);
+  return found;
+}
 function detectType(value) {
   if (value === "true" || value === "false") return "boolean";
   if (value !== "" && !isNaN(Number(value))) return "number";
@@ -747,12 +792,34 @@ async function commandCheck(args) {
     process.stdout.write(formatSuccess(keyCount, source));
     return;
   }
+  const scannedKeys = scanSourceFiles(cwd);
+  const examplePath = resolve(cwd, ".env.example");
+  const exampleVars = existsSync(examplePath) ? parseDotEnv(readFileSync(examplePath, "utf8")) : null;
+  const expectedKeys = /* @__PURE__ */ new Set();
+  let referenceSource = "";
+  if (scannedKeys.size > 0) {
+    for (const k of scannedKeys) expectedKeys.add(k);
+    referenceSource = `source code (${scannedKeys.size} keys found)`;
+  }
+  if (exampleVars) {
+    for (const k of Object.keys(exampleVars)) expectedKeys.add(k);
+    referenceSource = scannedKeys.size > 0 ? `source code + .env.example` : `.env.example`;
+  }
+  const missingKeys = expectedKeys.size > 0 ? [...expectedKeys].filter((k) => !(k in envVars)) : [];
+  const unusedKeys = scannedKeys.size > 0 ? Object.keys(envVars).filter((k) => !scannedKeys.has(k) && !(exampleVars && k in exampleVars)) : [];
   console.log([
     "",
-    `  ${pc2.bold(pc2.cyan("guardian-env"))} ${pc2.dim("\u2014 auto mode (no schema file found)")}`,
-    `  ${pc2.dim("Tip: run")} ${pc2.cyan("npx guardian-env init")} ${pc2.dim("to generate a typed schema")}`,
+    `  ${pc2.bold(pc2.cyan("guardian-env"))} ${pc2.dim("\u2014 auto mode")}`,
+    referenceSource ? `  ${pc2.dim("Reference:")} ${pc2.cyan(referenceSource)}` : `  ${pc2.dim("No reference found. Add")} ${pc2.cyan(".env.example")} ${pc2.dim("or use")} ${pc2.cyan("process.env.KEY")} ${pc2.dim("in your source code.")}`,
     ""
   ].join("\n"));
+  if (missingKeys.length > 0) {
+    console.log(pc2.bold(pc2.dim(`  \u2500\u2500 Missing Variables (${missingKeys.length}) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`)));
+    for (const key of missingKeys) {
+      console.log(`  ${pc2.red("\u2716")} ${pc2.bold(pc2.red(key))} ${pc2.dim("\u2192")} ${pc2.red("used in code but not set in .env")}`);
+    }
+    console.log("");
+  }
   const inferredSchema = inferSchemaFromEnv(envVars);
   const rows = [];
   for (const [key, value] of Object.entries(envVars)) {
@@ -779,28 +846,41 @@ async function commandCheck(args) {
     if (!row.ok) hasInvalid = true;
   }
   console.log(`  ${pc2.dim("\u2500".repeat(60))}`);
-  if (hasInvalid && args.strict) {
-    console.log(`
-  ${pc2.red("\u2716")} ${pc2.bold(pc2.red("Validation failed"))} ${pc2.dim("(--strict mode)")}
-`);
+  if (unusedKeys.length > 0) {
+    console.log("");
+    console.log(pc2.bold(pc2.dim(`  \u2500\u2500 Unused Variables (${unusedKeys.length}) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`)));
+    for (const key of unusedKeys) {
+      console.log(`  ${pc2.dim("\xB7")} ${pc2.dim(key)} ${pc2.dim("\u2192 in .env but not found in source code")}`);
+    }
+  }
+  const hasMissing = missingKeys.length > 0;
+  const invalidCount = rows.filter((r) => !r.ok).length;
+  if (hasMissing || hasInvalid && args.strict) {
+    const reasons = [];
+    if (hasMissing) reasons.push(`${missingKeys.length} missing`);
+    if (hasInvalid && args.strict) reasons.push(`${invalidCount} invalid`);
+    console.log([
+      "",
+      `  ${pc2.red("\u2716")} ${pc2.bold(pc2.red(`Validation failed`))} ${pc2.dim(`(${reasons.join(", ")})`)}`,
+      hasMissing ? `  ${pc2.dim("Add the missing variables to your")} ${pc2.cyan(source)} ${pc2.dim("file.")}` : `  ${pc2.dim("Fix the invalid values in your")} ${pc2.cyan(source)} ${pc2.dim("file.")}`,
+      ""
+    ].join("\n"));
     process.exit(1);
   }
-  const total = rows.length;
-  const invalidCount = rows.filter((r) => !r.ok).length;
   if (invalidCount > 0) {
     console.log([
       "",
-      `  ${pc2.yellow("\u26A0")} ${pc2.bold(pc2.yellow(`${invalidCount} value(s) look malformed`))} ${pc2.dim(`out of ${total}`)}`,
+      `  ${pc2.yellow("\u26A0")} ${pc2.bold(pc2.yellow(`${invalidCount} value(s) look malformed`))} ${pc2.dim(`out of ${rows.length}`)}`,
       `  ${pc2.dim("Run")} ${pc2.cyan("npx guardian-env init")} ${pc2.dim("to create a schema and validate strictly.")}`,
       ""
     ].join("\n"));
   } else {
     console.log([
       "",
-      `  ${pc2.green("\u2714")} ${pc2.bold(pc2.green(`All ${total} variables look good`))} ${pc2.dim(`(inferred from ${source})`)}`,
-      `  ${pc2.dim("Run")} ${pc2.cyan("npx guardian-env init")} ${pc2.dim("to add strict validation with types.")}`,
+      `  ${pc2.green("\u2714")} ${pc2.bold(pc2.green(`All ${rows.length} variables look good`))} ${pc2.dim(`(inferred from ${source})`)}`,
+      !exampleVars ? `  ${pc2.dim("Run")} ${pc2.cyan("npx guardian-env init")} ${pc2.dim("to add strict validation with types.")}` : "",
       ""
-    ].join("\n"));
+    ].filter(Boolean).join("\n"));
   }
 }
 async function commandInit(args) {
