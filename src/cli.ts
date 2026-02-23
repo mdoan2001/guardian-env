@@ -131,6 +131,36 @@ function inferSchemaFromEnv(env: Record<string, string>): FlatSchemaShape {
   return schema;
 }
 
+// ─── Project Config (from package.json) ──────────────────────────────────────
+
+interface GuardianConfig {
+  ignore: string[];
+  src: string | undefined;
+}
+
+function loadProjectConfig(cwd: string): GuardianConfig {
+  const pkgPath = resolve(cwd, "package.json");
+  const defaults: GuardianConfig = { ignore: [], src: undefined };
+
+  if (!existsSync(pkgPath)) return defaults;
+
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as Record<string, unknown>;
+    const cfg = pkg["guardian-env"];
+    if (!cfg || typeof cfg !== "object") return defaults;
+
+    const raw = cfg as Record<string, unknown>;
+    return {
+      ignore: Array.isArray(raw["ignore"])
+        ? (raw["ignore"] as unknown[]).filter((v): v is string => typeof v === "string")
+        : [],
+      src: typeof raw["src"] === "string" ? raw["src"] : undefined,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
 // ─── Schema Loader ────────────────────────────────────────────────────────────
 
 const SCHEMA_SEARCH_PATHS = [
@@ -226,6 +256,8 @@ function parseArgs(argv: string[]): CliArgs {
 
 async function commandCheck(args: CliArgs): Promise<void> {
   const cwd = process.cwd();
+  const projectConfig = loadProjectConfig(cwd);
+  const ignoreSet = new Set(projectConfig.ignore);
   const envPath = resolve(cwd, args.envFile);
 
   // ── 1. Load .env file ──
@@ -289,7 +321,14 @@ async function commandCheck(args: CliArgs): Promise<void> {
   // ── 3. No schema — auto-infer mode ──
 
   // Priority 1: scan source code for process.env.KEY / import.meta.env.KEY
-  const scannedKeys = scanSourceFiles(cwd);
+  const scanRoot = projectConfig.src ? resolve(cwd, projectConfig.src) : cwd;
+  const rawScannedKeys = scanSourceFiles(scanRoot);
+
+  // Apply ignore list
+  const scannedKeys = new Set<string>();
+  for (const k of rawScannedKeys) {
+    if (!ignoreSet.has(k)) scannedKeys.add(k);
+  }
 
   // Priority 2: fallback to .env.example keys
   const examplePath = resolve(cwd, ".env.example");
@@ -307,7 +346,9 @@ async function commandCheck(args: CliArgs): Promise<void> {
     referenceSource = `source code (${scannedKeys.size} keys found)`;
   }
   if (exampleVars) {
-    for (const k of Object.keys(exampleVars)) expectedKeys.add(k);
+    for (const k of Object.keys(exampleVars)) {
+      if (!ignoreSet.has(k)) expectedKeys.add(k);
+    }
     referenceSource = scannedKeys.size > 0
       ? `source code + .env.example`
       : `.env.example`;
@@ -329,8 +370,11 @@ async function commandCheck(args: CliArgs): Promise<void> {
     referenceSource
       ? `  ${pc.dim("Reference:")} ${pc.cyan(referenceSource)}`
       : `  ${pc.dim("No reference found. Add")} ${pc.cyan(".env.example")} ${pc.dim("or use")} ${pc.cyan("process.env.KEY")} ${pc.dim("in your source code.")}`,
+    ignoreSet.size > 0
+      ? `  ${pc.dim(`Ignoring: ${[...ignoreSet].join(", ")}`)}`
+      : "",
     "",
-  ].join("\n"));
+  ].filter(Boolean).join("\n"));
 
   // Report missing keys
   if (missingKeys.length > 0) {

@@ -683,6 +683,23 @@ function inferSchemaFromEnv(env) {
   }
   return schema;
 }
+function loadProjectConfig(cwd) {
+  const pkgPath = resolve(cwd, "package.json");
+  const defaults = { ignore: [], src: void 0 };
+  if (!existsSync(pkgPath)) return defaults;
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    const cfg = pkg["guardian-env"];
+    if (!cfg || typeof cfg !== "object") return defaults;
+    const raw = cfg;
+    return {
+      ignore: Array.isArray(raw["ignore"]) ? raw["ignore"].filter((v) => typeof v === "string") : [],
+      src: typeof raw["src"] === "string" ? raw["src"] : void 0
+    };
+  } catch {
+    return defaults;
+  }
+}
 var SCHEMA_SEARCH_PATHS = [
   "guardian-env.config.ts",
   "guardian-env.config.js",
@@ -752,6 +769,8 @@ function parseArgs(argv) {
 }
 async function commandCheck(args) {
   const cwd = process.cwd();
+  const projectConfig = loadProjectConfig(cwd);
+  const ignoreSet = new Set(projectConfig.ignore);
   const envPath = resolve(cwd, args.envFile);
   if (!existsSync(envPath)) {
     console.error([
@@ -792,7 +811,12 @@ async function commandCheck(args) {
     process.stdout.write(formatSuccess(keyCount, source));
     return;
   }
-  const scannedKeys = scanSourceFiles(cwd);
+  const scanRoot = projectConfig.src ? resolve(cwd, projectConfig.src) : cwd;
+  const rawScannedKeys = scanSourceFiles(scanRoot);
+  const scannedKeys = /* @__PURE__ */ new Set();
+  for (const k of rawScannedKeys) {
+    if (!ignoreSet.has(k)) scannedKeys.add(k);
+  }
   const examplePath = resolve(cwd, ".env.example");
   const exampleVars = existsSync(examplePath) ? parseDotEnv(readFileSync(examplePath, "utf8")) : null;
   const expectedKeys = /* @__PURE__ */ new Set();
@@ -802,7 +826,9 @@ async function commandCheck(args) {
     referenceSource = `source code (${scannedKeys.size} keys found)`;
   }
   if (exampleVars) {
-    for (const k of Object.keys(exampleVars)) expectedKeys.add(k);
+    for (const k of Object.keys(exampleVars)) {
+      if (!ignoreSet.has(k)) expectedKeys.add(k);
+    }
     referenceSource = scannedKeys.size > 0 ? `source code + .env.example` : `.env.example`;
   }
   const missingKeys = expectedKeys.size > 0 ? [...expectedKeys].filter((k) => !(k in envVars)) : [];
@@ -811,8 +837,9 @@ async function commandCheck(args) {
     "",
     `  ${pc2.bold(pc2.cyan("guardian-env"))} ${pc2.dim("\u2014 auto mode")}`,
     referenceSource ? `  ${pc2.dim("Reference:")} ${pc2.cyan(referenceSource)}` : `  ${pc2.dim("No reference found. Add")} ${pc2.cyan(".env.example")} ${pc2.dim("or use")} ${pc2.cyan("process.env.KEY")} ${pc2.dim("in your source code.")}`,
+    ignoreSet.size > 0 ? `  ${pc2.dim(`Ignoring: ${[...ignoreSet].join(", ")}`)}` : "",
     ""
-  ].join("\n"));
+  ].filter(Boolean).join("\n"));
   if (missingKeys.length > 0) {
     console.log(pc2.bold(pc2.dim(`  \u2500\u2500 Missing Variables (${missingKeys.length}) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`)));
     for (const key of missingKeys) {

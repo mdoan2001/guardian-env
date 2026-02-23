@@ -147,6 +147,24 @@ npx guardian-env inspect            # show schema field table
 --strict                 # fail on type mismatch in auto mode
 ```
 
+### Config in `package.json`
+
+No extra files needed. Add a `"guardian-env"` key to your `package.json`:
+
+```json
+{
+  "guardian-env": {
+    "ignore": ["SITE", "ORIGIN"],
+    "src": "src"
+  }
+}
+```
+
+| Option | Description |
+|---|---|
+| `ignore` | Keys to exclude from validation (e.g. framework-injected vars like `SITE`, `ORIGIN`) |
+| `src` | Directory to scan for env usage (default: project root) |
+
 ---
 
 ## Advanced
