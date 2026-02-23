@@ -101,7 +101,7 @@ function scanSourceFiles(cwd: string): Set<string> {
 
 // ─── Smart type detection ─────────────────────────────────────────────────────
 
-type InferredType = "boolean" | "number" | "url" | "email" | "string";
+type InferredType = "boolean" | "number" | "url" | "url-invalid" | "email" | "string";
 
 function detectType(value: string): InferredType {
   if (value === "true" || value === "false") return "boolean";
@@ -109,6 +109,8 @@ function detectType(value: string): InferredType {
   try {
     const u = new URL(value);
     if (u.protocol === "http:" || u.protocol === "https:") return "url";
+    // Parsed as a URL structurally but uses an unrecognised protocol — flag it
+    if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:$/.test(u.protocol)) return "url-invalid";
   } catch { /* not a url */ }
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return "email";
   return "string";
@@ -120,11 +122,12 @@ function inferSchemaFromEnv(env: Record<string, string>): FlatSchemaShape {
   for (const [key, value] of Object.entries(env)) {
     const type = detectType(value);
     switch (type) {
-      case "boolean": schema[key] = boolean().optional(); break;
-      case "number":  schema[key] = number().optional();  break;
-      case "url":     schema[key] = url().optional();     break;
-      case "email":   schema[key] = email().optional();   break;
-      default:        schema[key] = string().optional();  break;
+      case "boolean":     schema[key] = boolean().optional(); break;
+      case "number":      schema[key] = number().optional();  break;
+      case "url":         schema[key] = url().optional();     break;
+      case "url-invalid": schema[key] = url().optional();     break;
+      case "email":       schema[key] = email().optional();   break;
+      default:            schema[key] = string().optional();  break;
     }
   }
 
@@ -410,12 +413,16 @@ async function commandCheck(args: CliArgs): Promise<void> {
   let hasInvalid = false;
   for (const row of rows) {
     const key = row.key.padEnd(colKey);
-    const type = pc.dim(row.type.padEnd(12));
+    const displayType = row.type === "url-invalid" ? "url" : row.type;
+    const type = row.type === "url-invalid" ? pc.red(displayType.padEnd(12)) : pc.dim(displayType.padEnd(12));
     const val = row.value.length > 40 ? row.value.slice(0, 37) + "..." : row.value;
-    const displayVal = row.ok ? pc.white(val) : pc.red(val);
-    const status = row.ok ? "" : ` ${pc.red("✖ invalid " + row.type)}`;
+    const isInvalid = !row.ok || row.type === "url-invalid";
+    const displayVal = isInvalid ? pc.red(val) : pc.white(val);
+    const status = row.type === "url-invalid"
+      ? ` ${pc.red("✖ invalid protocol (expected http or https)")}`
+      : !row.ok ? ` ${pc.red("✖ invalid " + displayType)}` : "";
     console.log(`  ${pc.bold(key)}${type}${displayVal}${status}`);
-    if (!row.ok) hasInvalid = true;
+    if (isInvalid) hasInvalid = true;
   }
 
   console.log(`  ${pc.dim("─".repeat(60))}`);
@@ -625,10 +632,11 @@ function buildValidator(key: string, value: string, type: InferredType): string 
   }
 
   switch (type) {
-    case "boolean": return `boolean()${value ? `.default(${value})` : suffix}`;
-    case "number":  return `number()${value ? `.default(${Number(value)})` : suffix}`;
-    case "url":     return `url()${suffix}`;
-    case "email":   return `email()${suffix}`;
+    case "boolean":     return `boolean()${value ? `.default(${value})` : suffix}`;
+    case "number":      return `number()${value ? `.default(${Number(value)})` : suffix}`;
+    case "url":
+    case "url-invalid": return `url()${suffix}`;
+    case "email":       return `email()${suffix}`;
     default: {
       if (!isRequired) return `string().optional()`;
       return `string()${value.length > 40 ? "" : `.default(${JSON.stringify(value)})`}`;

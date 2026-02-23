@@ -654,6 +654,7 @@ function detectType(value) {
   try {
     const u = new URL(value);
     if (u.protocol === "http:" || u.protocol === "https:") return "url";
+    if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:$/.test(u.protocol)) return "url-invalid";
   } catch {
   }
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return "email";
@@ -671,6 +672,9 @@ function inferSchemaFromEnv(env) {
         schema[key] = number().optional();
         break;
       case "url":
+        schema[key] = url().optional();
+        break;
+      case "url-invalid":
         schema[key] = url().optional();
         break;
       case "email":
@@ -865,12 +869,14 @@ async function commandCheck(args) {
   let hasInvalid = false;
   for (const row of rows) {
     const key = row.key.padEnd(colKey);
-    const type = pc2.dim(row.type.padEnd(12));
+    const displayType = row.type === "url-invalid" ? "url" : row.type;
+    const type = row.type === "url-invalid" ? pc2.red(displayType.padEnd(12)) : pc2.dim(displayType.padEnd(12));
     const val = row.value.length > 40 ? row.value.slice(0, 37) + "..." : row.value;
-    const displayVal = row.ok ? pc2.white(val) : pc2.red(val);
-    const status = row.ok ? "" : ` ${pc2.red("\u2716 invalid " + row.type)}`;
+    const isInvalid = !row.ok || row.type === "url-invalid";
+    const displayVal = isInvalid ? pc2.red(val) : pc2.white(val);
+    const status = row.type === "url-invalid" ? ` ${pc2.red("\u2716 invalid protocol (expected http or https)")}` : !row.ok ? ` ${pc2.red("\u2716 invalid " + displayType)}` : "";
     console.log(`  ${pc2.bold(key)}${type}${displayVal}${status}`);
-    if (!row.ok) hasInvalid = true;
+    if (isInvalid) hasInvalid = true;
   }
   console.log(`  ${pc2.dim("\u2500".repeat(60))}`);
   if (unusedKeys.length > 0) {
@@ -1035,6 +1041,7 @@ function buildValidator(key, value, type) {
     case "number":
       return `number()${value ? `.default(${Number(value)})` : suffix}`;
     case "url":
+    case "url-invalid":
       return `url()${suffix}`;
     case "email":
       return `email()${suffix}`;
