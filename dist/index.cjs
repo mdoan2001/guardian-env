@@ -266,6 +266,12 @@ var UrlValidator = class _UrlValidator extends BaseValidator {
         error: `URL protocol must be one of [${this._protocols.join(", ")}], got "${protocol}"`
       };
     }
+    if (/\/{2,}/.test(parsed.pathname)) {
+      return {
+        ok: false,
+        error: `URL path must not contain consecutive slashes, got "${raw}"`
+      };
+    }
     return { ok: true, value: raw };
   }
   protocols(...allowed) {

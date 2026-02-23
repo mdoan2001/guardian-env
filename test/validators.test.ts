@@ -154,6 +154,14 @@ describe("url()", () => {
     expect(url().parse("ftp://example.com").ok).toBe(false);
   });
 
+  it("fails on typo'd protocol (e.g. httpsssss://)", () => {
+    expect(url().parse("httpsssss://localhost:3000").ok).toBe(false);
+  });
+
+  it("fails on URL with trailing slashes in path", () => {
+    expect(url().parse("http://localhost:3000/api////").ok).toBe(false);
+  });
+
   it("protocols() allows custom protocols", () => {
     expect(url().protocols("ftp", "sftp").parse("ftp://example.com")).toEqual({
       ok: true,
